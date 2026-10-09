@@ -1,0 +1,264 @@
+<?php
+
+header('Content-Type: application/json; charset=utf-8');
+
+require_once __DIR__ . '/graphql_client.php';
+
+$serial = trim($_GET['serial'] ?? '');
+
+if ($serial === '') {
+    http_response_code(400);
+
+    echo json_encode([
+        'success' => false,
+        'found' => false,
+        'error' => 'Serial number is required'
+    ], JSON_PRETTY_PRINT);
+
+    exit;
+}
+
+if (strlen($serial) > 100) {
+    http_response_code(400);
+
+    echo json_encode([
+        'success' => false,
+        'found' => false,
+        'error' => 'Invalid serial number'
+    ], JSON_PRETTY_PRINT);
+
+    exit;
+}
+
+$query = <<<'GRAPHQL'
+query FindDeviceBySerial($serial: Mixed) {
+    devices(
+        first: 1
+        where: {
+            column: "serial_number"
+            operator: EQ
+            value: $serial
+        }
+    ) {
+        data {
+            id
+            serial_number
+            status
+            initial_status
+            diagnostic_status
+
+            initial_cost
+            determined_cost
+            processing_cost
+
+            initial_overall_grade
+            determined_overall_grade
+            finale_grade
+
+            initial_defect_codes
+            determined_defect_codes
+
+            location {
+                id
+                name
+            }
+
+            product {
+                product_unique_id
+                description
+                erp_make_name
+                erp_model_number
+                erp_cpu
+                erp_ram
+                erp_storage
+
+                category {
+                    name
+                    product_type
+                }
+            }
+        }
+    }
+}
+GRAPHQL;
+
+try {
+
+    $client = new ERPGraphQLClient();
+
+    $result = $client->query($query, [
+        'serial' => $serial
+    ]);
+
+    /*
+     * Connection / HTTP error
+     */
+    if (!empty($result['curl_error'])) {
+
+        http_response_code(502);
+
+        echo json_encode([
+            'success' => false,
+            'found' => false,
+            'error' => 'Unable to connect to ERP',
+            'details' => $result['curl_error']
+        ], JSON_PRETTY_PRINT);
+
+        exit;
+    }
+
+    /*
+     * ERP returned non-200 response
+     */
+    if (($result['http_code'] ?? 0) !== 200) {
+
+        http_response_code(502);
+
+        echo json_encode([
+            'success' => false,
+            'found' => false,
+            'error' => 'ERP returned HTTP ' . ($result['http_code'] ?? 0),
+            'erp_response' => $result['response'] ?? $result['raw'] ?? null
+        ], JSON_PRETTY_PRINT);
+
+        exit;
+    }
+
+    $response = $result['response'] ?? null;
+
+    /*
+     * GraphQL errors
+     */
+    if (!empty($response['errors'])) {
+
+        http_response_code(502);
+
+        echo json_encode([
+            'success' => false,
+            'found' => false,
+            'error' => 'ERP GraphQL error',
+            'graphql_errors' => $response['errors']
+        ], JSON_PRETTY_PRINT);
+
+        exit;
+    }
+
+    $devices = $response['data']['devices']['data'] ?? [];
+
+    /*
+     * Serial not found
+     */
+    if (empty($devices)) {
+
+        echo json_encode([
+            'success' => true,
+            'found' => false,
+            'serial' => $serial
+        ], JSON_PRETTY_PRINT);
+
+        exit;
+    }
+
+    $device = $devices[0];
+
+    /*
+     * Extra safety:
+     * Never accept a different serial.
+     */
+    if (
+        !isset($device['serial_number']) ||
+        strcasecmp(trim($device['serial_number']), $serial) !== 0
+    ) {
+
+        http_response_code(409);
+
+        echo json_encode([
+            'success' => false,
+            'found' => false,
+            'error' => 'ERP returned a different serial number',
+            'requested_serial' => $serial,
+            'returned_serial' => $device['serial_number'] ?? null
+        ], JSON_PRETTY_PRINT);
+
+        exit;
+    }
+
+    /*
+     * Successful exact match.
+     *
+     * For now we return the ERP fields without inventing
+     * Recovery economics or changing ERP data.
+     */
+
+    echo json_encode([
+        'success' => true,
+        'found' => true,
+
+        'device' => [
+
+            'erp_device_id' => $device['id'] ?? null,
+
+            'serial_number' => $device['serial_number'] ?? null,
+
+            'product_id' =>
+                $device['product']['product_unique_id'] ?? null,
+
+            'product_description' =>
+                $device['product']['description'] ?? null,
+
+            'category' =>
+                $device['product']['category']['name'] ?? null,
+
+            'product_type' =>
+                $device['product']['category']['product_type'] ?? null,
+
+            'status' =>
+                $device['status'] ?? null,
+
+            'initial_status' =>
+                $device['initial_status'] ?? null,
+
+            'diagnostic_status' =>
+                $device['diagnostic_status'] ?? null,
+
+            'location' =>
+                $device['location']['name'] ?? null,
+
+            'initial_defect_codes' =>
+                $device['initial_defect_codes'] ?? null,
+
+            'determined_defect_codes' =>
+                $device['determined_defect_codes'] ?? null,
+
+            'initial_grade' =>
+                $device['initial_overall_grade'] ?? null,
+
+            'determined_grade' =>
+                $device['determined_overall_grade'] ?? null,
+
+            'final_grade' =>
+                $device['finale_grade'] ?? null,
+
+            'initial_cost' =>
+                $device['initial_cost'] ?? null,
+
+            'determined_cost' =>
+                $device['determined_cost'] ?? null,
+
+            'processing_cost' =>
+                $device['processing_cost'] ?? null
+        ]
+
+    ], JSON_PRETTY_PRINT);
+
+} catch (Throwable $e) {
+
+    http_response_code(500);
+
+    echo json_encode([
+        'success' => false,
+        'found' => false,
+        'error' => 'Recovery Hub internal error',
+        'message' => $e->getMessage()
+    ], JSON_PRETTY_PRINT);
+}

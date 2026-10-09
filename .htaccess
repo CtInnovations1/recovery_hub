@@ -1,0 +1,7 @@
+# Exported data and deployment material must not be downloadable.
+<FilesMatch "(?i)(\.(sql|gz|zip|bak|log|md|ini|env)$|\.bak_|\.BACKUP|^patch_)">
+    Require all denied
+</FilesMatch>
+RewriteEngine On
+RewriteRule ^(?:config|backups|bin|migrations|tests|includes|api/api)(?:/|$) - [F,L]
+RewriteRule ^uploads/.*\.php(?:/|$) - [F,L,NC]

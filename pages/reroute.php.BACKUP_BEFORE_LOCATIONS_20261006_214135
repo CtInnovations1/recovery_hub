@@ -1,0 +1,1841 @@
+<?php
+declare(strict_types=1);
+
+require_once __DIR__ . '/../config/database.php';
+
+$currentPage = 'reroute';
+
+function h(?string $value): string
+{
+    return htmlspecialchars(
+        (string)$value,
+        ENT_QUOTES,
+        'UTF-8'
+    );
+}
+
+function recoveryLabel(string $type): string
+{
+    return match ($type) {
+        'REC_WHATNOT'   => 'Whatnot',
+        'REC_WHOLESALE' => 'Wholesale',
+        'REC_REPAIR'    => 'Repair',
+        'REC_HARVEST'   => 'Harvest',
+        default         => $type,
+    };
+}
+
+$types = [
+    'REC_WHATNOT',
+    'REC_WHOLESALE',
+    'REC_REPAIR',
+    'REC_HARVEST',
+];
+
+/*
+|--------------------------------------------------------------------------
+| Active destination mapping
+|--------------------------------------------------------------------------
+*/
+
+$destinationRows = $pdo->query("
+    SELECT
+        recovery_type,
+        erp_location_id,
+        location_name,
+        location_type
+    FROM recovery_location_map
+    WHERE is_active = 1
+    ORDER BY recovery_type
+")->fetchAll(PDO::FETCH_ASSOC);
+
+$destinations = [];
+
+foreach ($destinationRows as $row) {
+    $destinations[$row['recovery_type']] = $row;
+}
+
+/*
+|--------------------------------------------------------------------------
+| Pending reroutes
+|--------------------------------------------------------------------------
+*/
+
+$pendingStmt = $pdo->query("
+    SELECT
+        r.id,
+        r.serial_number,
+        d.product_id,
+        r.original_recovery_type,
+        r.new_recovery_type,
+        r.original_location_name,
+        r.new_location_name,
+        r.reroute_reason,
+        r.requested_at
+    FROM recovery_reroutes r
+    LEFT JOIN recovery_devices d
+        ON d.id = r.recovery_device_id
+    WHERE r.status = 'PENDING'
+    ORDER BY
+        r.requested_at DESC,
+        r.id DESC
+    LIMIT 100
+");
+
+$pendingReroutes =
+    $pendingStmt->fetchAll(PDO::FETCH_ASSOC);
+
+?>
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Recovery Routing | CTI ERP</title>
+
+    <link
+        rel="stylesheet"
+        href="/assets/css/erp-theme.css"
+    >
+
+    <style>
+
+        .reroute-layout {
+            display:grid;
+            grid-template-columns:
+                minmax(0,1.15fr)
+                minmax(360px,.85fr);
+            gap:18px;
+            align-items:start;
+        }
+
+        .workflow-card {
+            overflow:hidden;
+        }
+
+        .workflow-header {
+            padding:18px 20px;
+            border-bottom:1px solid #e4e7ec;
+        }
+
+        .workflow-title {
+            color:#0f1b3d;
+            font-size:16px;
+            font-weight:800;
+        }
+
+        .workflow-subtitle {
+            margin-top:4px;
+            color:#858998;
+            font-size:12px;
+        }
+
+        .workflow-body {
+            padding:20px;
+        }
+
+        .step-label {
+            display:flex;
+            align-items:center;
+            gap:8px;
+            margin-bottom:10px;
+            color:#596174;
+            font-size:12px;
+            font-weight:700;
+        }
+
+        .step-number {
+            width:23px;
+            height:23px;
+            border-radius:50%;
+            display:grid;
+            place-items:center;
+            background:#eef5ff;
+            color:#1565c0;
+            font-size:11px;
+            font-weight:800;
+        }
+
+        .scan-row {
+            display:flex;
+            gap:8px;
+        }
+
+        .scan-input {
+            flex:1;
+            height:44px;
+            padding:0 12px;
+            border:1px solid #d9dde5;
+            border-radius:5px;
+            outline:none;
+            font-size:14px;
+        }
+
+        .scan-input:focus {
+            border-color:#1683f8;
+            box-shadow:0 0 0 2px rgba(22,131,248,.10);
+        }
+
+        .btn {
+            min-height:40px;
+            border-radius:5px;
+            padding:0 16px;
+            cursor:pointer;
+            font-family:inherit;
+            font-size:13px;
+            font-weight:700;
+        }
+
+        .btn-primary {
+            border:1px solid #1976d2;
+            background:#1976d2;
+            color:#fff;
+        }
+
+        .btn-primary:disabled {
+            opacity:.5;
+            cursor:not-allowed;
+        }
+
+        .btn-secondary {
+            border:1px solid #d9dde5;
+            background:#fff;
+            color:#26304a;
+        }
+
+        .device-panel {
+            display:none;
+            margin-top:20px;
+        }
+
+        .device-panel.visible {
+            display:block;
+        }
+
+        .device-summary {
+            padding:16px;
+            background:#fafbfc;
+            border:1px solid #e4e7ec;
+            border-radius:5px;
+        }
+
+        .device-title-row {
+            display:flex;
+            justify-content:space-between;
+            gap:15px;
+            align-items:flex-start;
+        }
+
+        .device-serial {
+            color:#0f1b3d;
+            font-size:18px;
+            font-weight:800;
+        }
+
+        .device-product {
+            margin-top:4px;
+            color:#596174;
+            font-size:12px;
+        }
+
+        .status-pill {
+            display:inline-flex;
+            align-items:center;
+            padding:4px 9px;
+            border-radius:999px;
+            background:#eef7f0;
+            color:#347744;
+            font-size:10px;
+            font-weight:800;
+        }
+
+        .device-grid {
+            display:grid;
+            grid-template-columns:1fr 1fr;
+            gap:14px 20px;
+            margin-top:16px;
+        }
+
+        .info-field span {
+            display:block;
+            margin-bottom:4px;
+            color:#858998;
+            font-size:11px;
+        }
+
+        .info-field strong {
+            display:block;
+            color:#26304a;
+            font-size:13px;
+            overflow-wrap:anywhere;
+        }
+
+        .defects {
+            display:flex;
+            flex-wrap:wrap;
+            gap:6px;
+            margin-top:8px;
+        }
+
+        .defect {
+            padding:4px 8px;
+            border-radius:12px;
+            background:#fff3e8;
+            color:#9a4c00;
+            font-size:10px;
+            font-weight:700;
+        }
+
+        .form-section {
+            margin-top:22px;
+            padding-top:20px;
+            border-top:1px solid #edf0f3;
+        }
+
+        .field {
+            margin-bottom:15px;
+        }
+
+        .field label {
+            display:block;
+            margin-bottom:6px;
+            color:#596174;
+            font-size:12px;
+            font-weight:700;
+        }
+
+        .field select,
+        .field textarea {
+            width:100%;
+            border:1px solid #d9dde5;
+            border-radius:5px;
+            background:#fff;
+            color:#26304a;
+            font-family:inherit;
+            outline:none;
+        }
+
+        .field select {
+            height:42px;
+            padding:0 10px;
+        }
+
+        .field textarea {
+            min-height:90px;
+            padding:10px;
+            resize:vertical;
+        }
+
+        .field select:focus,
+        .field textarea:focus {
+            border-color:#1683f8;
+            box-shadow:0 0 0 2px rgba(22,131,248,.10);
+        }
+
+        .destination-box {
+            display:none;
+            padding:14px;
+            margin-bottom:15px;
+            border:1px solid #cfe3ff;
+            border-radius:5px;
+            background:#f4f9ff;
+        }
+
+        .destination-box.visible {
+            display:block;
+        }
+
+        .destination-label {
+            color:#596174;
+            font-size:11px;
+        }
+
+        .destination-name {
+            margin-top:4px;
+            color:#0f1b3d;
+            font-size:15px;
+            font-weight:800;
+        }
+
+        .destination-meta {
+            margin-top:3px;
+            color:#858998;
+            font-size:11px;
+        }
+
+        .message {
+            display:none;
+            margin-top:14px;
+            padding:12px 14px;
+            border-radius:5px;
+            font-size:12px;
+        }
+
+        .message.visible {
+            display:block;
+        }
+
+        .message.error {
+            background:#fff4f2;
+            border:1px solid #fecdca;
+            color:#b42318;
+        }
+
+        .message.success {
+            background:#ecfdf3;
+            border:1px solid #abefc6;
+            color:#067647;
+        }
+
+        .pending-card {
+            overflow:hidden;
+        }
+
+        .pending-header {
+            display:flex;
+            justify-content:space-between;
+            gap:10px;
+            align-items:center;
+            padding:16px 18px;
+            border-bottom:1px solid #e4e7ec;
+        }
+
+        .pending-title {
+            color:#0f1b3d;
+            font-weight:800;
+        }
+
+        .pending-count {
+            min-width:27px;
+            height:27px;
+            padding:0 7px;
+            display:grid;
+            place-items:center;
+            border-radius:999px;
+            background:#fff4e5;
+            color:#b54708;
+            font-size:11px;
+            font-weight:800;
+        }
+
+        .pending-list {
+            max-height:690px;
+            overflow-y:auto;
+        }
+
+        .pending-item {
+            padding:15px 18px;
+            border-bottom:1px solid #edf0f3;
+        }
+
+        .pending-item:last-child {
+            border-bottom:0;
+        }
+
+        .pending-serial {
+            color:#0f1b3d;
+            font-size:13px;
+            font-weight:800;
+        }
+
+        .pending-product {
+            margin-top:2px;
+            color:#858998;
+            font-size:11px;
+        }
+
+        .route-line {
+            display:flex;
+            align-items:center;
+            gap:7px;
+            margin-top:10px;
+            font-size:11px;
+        }
+
+        .route-path {
+            padding:3px 7px;
+            border-radius:10px;
+            background:#eef5ff;
+            color:#1565c0;
+            font-weight:700;
+        }
+
+        .route-arrow {
+            color:#858998;
+        }
+
+        .pending-location {
+            margin-top:8px;
+            color:#596174;
+            font-size:11px;
+        }
+
+        .pending-reason {
+            margin-top:7px;
+            color:#596174;
+            font-size:11px;
+        }
+
+        .pending-time {
+            margin-top:7px;
+            color:#a0a5b1;
+            font-size:10px;
+        }
+
+        .pending-empty {
+            padding:50px 20px;
+            text-align:center;
+            color:#858998;
+            font-size:12px;
+        }
+
+        .warning-banner {
+            margin-bottom:18px;
+            padding:12px 15px;
+            border:1px solid #fedf89;
+            border-radius:5px;
+            background:#fffaeb;
+            color:#93370d;
+            font-size:12px;
+        }
+
+        .warning-banner strong {
+            color:#7a2e0e;
+        }
+
+        @media(max-width:1000px) {
+
+            .reroute-layout {
+                grid-template-columns:1fr;
+            }
+        }
+
+        @media(max-width:650px) {
+
+            .scan-row {
+                flex-direction:column;
+            }
+
+            .device-grid {
+                grid-template-columns:1fr;
+            }
+        }
+
+    </style>
+
+</head>
+
+<body>
+
+<?php require __DIR__ . '/../includes/header.php'; ?>
+
+<main class="page">
+
+    <div class="page-header">
+
+        <div>
+
+            <h1 class="page-title">
+                Recovery Routing
+            </h1>
+
+            <p class="page-description">
+                Assign the initial Recovery Path or reroute an existing
+                Recovery device using controlled physical routing.
+            </p>
+
+        </div>
+
+    </div>
+
+
+    <div class="warning-banner">
+
+        <strong>Physical movement control:</strong>
+
+        Initial routing and reroutes create a pending physical movement.
+        The Recovery Path and ERP Location are not finalized until the
+        destination movement is physically confirmed.
+
+    </div>
+
+
+    <div class="reroute-layout">
+
+        <!-- ===========================================================
+             WORKFLOW
+             =========================================================== -->
+
+        <section class="card workflow-card">
+
+            <div class="workflow-header">
+
+                <div
+                    id="workflowTitle"
+                    class="workflow-title"
+                >
+                    Recovery Routing
+                </div>
+
+                <div
+                    id="workflowSubtitle"
+                    class="workflow-subtitle"
+                >
+                    Scan device → select path → review destination
+                    → create movement
+                </div>
+
+            </div>
+
+
+            <div class="workflow-body">
+
+                <div class="step-label">
+
+                    <span class="step-number">
+                        1
+                    </span>
+
+                    Scan or enter serial number
+
+                </div>
+
+
+                <div class="scan-row">
+
+                    <input
+                        type="text"
+                        id="serialInput"
+                        class="scan-input"
+                        placeholder="Scan serial number"
+                        autocomplete="off"
+                        autofocus
+                    >
+
+                    <button
+                        type="button"
+                        class="btn btn-primary"
+                        onclick="lookupDevice()"
+                    >
+                        Find Device
+                    </button>
+
+                </div>
+
+
+                <div
+                    id="lookupMessage"
+                    class="message"
+                ></div>
+
+
+                <!-- Device -->
+
+                <div
+                    id="devicePanel"
+                    class="device-panel"
+                >
+
+                    <div class="step-label">
+
+                        <span class="step-number">
+                            2
+                        </span>
+
+                        Review current device
+
+                    </div>
+
+
+                    <div class="device-summary">
+
+                        <div class="device-title-row">
+
+                            <div>
+
+                                <div
+                                    id="deviceSerial"
+                                    class="device-serial"
+                                >
+                                    —
+                                </div>
+
+                                <div
+                                    id="deviceProduct"
+                                    class="device-product"
+                                >
+                                    —
+                                </div>
+
+                            </div>
+
+                            <span
+                                id="deviceStatus"
+                                class="status-pill"
+                            >
+                                —
+                            </span>
+
+                        </div>
+
+
+                        <div class="device-grid">
+
+                            <div class="info-field">
+
+                                <span>
+                                    Current Recovery Path
+                                </span>
+
+                                <strong id="currentPath">
+                                    —
+                                </strong>
+
+                            </div>
+
+
+                            <div class="info-field">
+
+                                <span>
+                                    Current Location
+                                </span>
+
+                                <strong id="currentLocation">
+                                    —
+                                </strong>
+
+                            </div>
+
+
+                            <div class="info-field">
+
+                                <span>
+                                    ERP Device ID
+                                </span>
+
+                                <strong id="erpDeviceId">
+                                    —
+                                </strong>
+
+                            </div>
+
+
+                            <div class="info-field">
+
+                                <span>
+                                    Grade
+                                </span>
+
+                                <strong id="deviceGrade">
+                                    —
+                                </strong>
+
+                            </div>
+
+                        </div>
+
+
+                        <div style="margin-top:15px;">
+
+                            <div class="info-field">
+
+                                <span>
+                                    Defects
+                                </span>
+
+                            </div>
+
+                            <div
+                                id="deviceDefects"
+                                class="defects"
+                            ></div>
+
+                        </div>
+
+                    </div>
+
+
+                    <!-- Reroute form -->
+
+                    <div class="form-section">
+
+                        <div class="step-label">
+
+                            <span class="step-number">
+                                3
+                            </span>
+
+                            <span id="routeStepText">
+                                Select Recovery Path
+                            </span>
+
+                        </div>
+
+
+                        <div class="field">
+
+                            <label
+                                id="newRecoveryTypeLabel"
+                                for="newRecoveryType"
+                            >
+                                Recovery Path
+                            </label>
+
+                            <select
+                                id="newRecoveryType"
+                                onchange="updateDestination()"
+                            >
+
+                                <option value="">
+                                    Select Recovery Path
+                                </option>
+
+                                <?php foreach ($types as $type): ?>
+
+                                    <option
+                                        value="<?= h($type) ?>"
+                                    >
+                                        <?= h(
+                                            recoveryLabel($type)
+                                        ) ?>
+                                    </option>
+
+                                <?php endforeach; ?>
+
+                            </select>
+
+                        </div>
+
+
+                        <div
+                            id="destinationBox"
+                            class="destination-box"
+                        >
+
+                            <div class="destination-label">
+                                Physical Destination
+                            </div>
+
+                            <div
+                                id="destinationName"
+                                class="destination-name"
+                            >
+                                —
+                            </div>
+
+                            <div
+                                id="destinationMeta"
+                                class="destination-meta"
+                            >
+                                —
+                            </div>
+
+                        </div>
+
+
+                        <div class="field">
+
+                            <label
+                                id="reasonLabel"
+                                for="rerouteReason"
+                            >
+                                Routing Reason
+                            </label>
+
+                            <textarea
+                                id="rerouteReason"
+                                maxlength="500"
+                                placeholder="Why is this Recovery Path being assigned?"
+                            ></textarea>
+
+                        </div>
+
+
+                        <button
+                            type="button"
+                            id="createButton"
+                            class="btn btn-primary"
+                            onclick="createReroute()"
+                        >
+                            Create Pending Movement
+                        </button>
+
+
+                        <div
+                            id="createMessage"
+                            class="message"
+                        ></div>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <!-- ===========================================================
+             PENDING MOVEMENTS
+             =========================================================== -->
+
+        <aside class="card pending-card">
+
+            <div class="pending-header">
+
+                <div class="pending-title">
+                    Pending Physical Moves
+                </div>
+
+                <div
+                    id="pendingCount"
+                    class="pending-count"
+                >
+                    <?= number_format(
+                        count($pendingReroutes)
+                    ) ?>
+                </div>
+
+            </div>
+
+
+            <div
+                id="pendingList"
+                class="pending-list"
+            >
+
+                <?php if (!$pendingReroutes): ?>
+
+                    <div
+                        id="pendingEmpty"
+                        class="pending-empty"
+                    >
+                        No pending reroutes.
+                    </div>
+
+                <?php else: ?>
+
+                    <?php foreach (
+                        $pendingReroutes as $reroute
+                    ): ?>
+
+                        <div class="pending-item">
+
+                            <div class="pending-serial">
+                                <?= h(
+                                    $reroute[
+                                        'serial_number'
+                                    ]
+                                ) ?>
+                            </div>
+
+                            <div class="pending-product">
+                                <?= h(
+                                    $reroute[
+                                        'product_id'
+                                    ] ?: 'UNASSIGNED PRODUCT'
+                                ) ?>
+                            </div>
+
+                            <div class="route-line">
+
+                                <span class="route-path">
+                                    <?= h(
+                                        recoveryLabel(
+                                            $reroute[
+                                                'original_recovery_type'
+                                            ]
+                                        )
+                                    ) ?>
+                                </span>
+
+                                <span class="route-arrow">
+                                    →
+                                </span>
+
+                                <span class="route-path">
+                                    <?= h(
+                                        recoveryLabel(
+                                            $reroute[
+                                                'new_recovery_type'
+                                            ]
+                                        )
+                                    ) ?>
+                                </span>
+
+                            </div>
+
+                            <div class="pending-location">
+
+                                Destination:
+                                <strong>
+                                    <?= h(
+                                        $reroute[
+                                            'new_location_name'
+                                        ]
+                                    ) ?>
+                                </strong>
+
+                            </div>
+
+                            <div class="pending-reason">
+                                <?= h(
+                                    $reroute[
+                                        'reroute_reason'
+                                    ]
+                                ) ?>
+                            </div>
+
+                            <div class="pending-time">
+
+                                Requested:
+                                <?= h(
+                                    $reroute[
+                                        'requested_at'
+                                    ]
+                                ) ?>
+
+                            </div>
+
+                        </div>
+
+                    <?php endforeach; ?>
+
+                <?php endif; ?>
+
+            </div>
+
+        </aside>
+
+    </div>
+
+</main>
+
+
+<script>
+
+const destinations =
+    <?= json_encode(
+        $destinations,
+        JSON_UNESCAPED_SLASHES |
+        JSON_UNESCAPED_UNICODE
+    ) ?>;
+
+let currentDevice = null;
+
+
+function valueOrDash(value)
+{
+    if (
+        value === null ||
+        value === undefined ||
+        value === ''
+    ) {
+        return '—';
+    }
+
+    return String(value);
+}
+
+
+function recoveryLabel(type)
+{
+    const labels = {
+        REC_WHATNOT: 'Whatnot',
+        REC_WHOLESALE: 'Wholesale',
+        REC_REPAIR: 'Repair',
+        REC_HARVEST: 'Harvest',
+        REVIEW_REQUIRED: 'Review Required'
+    };
+
+    return labels[type] || valueOrDash(type);
+}
+
+
+
+function isInitialRouting(device)
+{
+    if (!device) {
+        return false;
+    }
+
+    return (
+        device.recovery_status === 'PENDING_RECOVERY_REVIEW' ||
+        device.recovery_type === 'REVIEW_REQUIRED' ||
+        !device.recovery_type
+    );
+}
+
+
+function applyRoutingMode(device)
+{
+    const initial = isInitialRouting(device);
+
+    document.getElementById(
+        'workflowTitle'
+    ).textContent =
+        initial
+            ? 'Assign Initial Recovery Path'
+            : 'Create Reroute';
+
+    document.getElementById(
+        'workflowSubtitle'
+    ).textContent =
+        initial
+            ? 'Scan device → review defects → assign path → create physical movement'
+            : 'Scan device → select new path → review destination → create movement';
+
+    document.getElementById(
+        'routeStepText'
+    ).textContent =
+        initial
+            ? 'Assign initial Recovery Path'
+            : 'Select new Recovery Path';
+
+    document.getElementById(
+        'newRecoveryTypeLabel'
+    ).textContent =
+        initial
+            ? 'Recovery Path'
+            : 'New Recovery Path';
+
+    document.getElementById(
+        'reasonLabel'
+    ).textContent =
+        initial
+            ? 'Routing Reason'
+            : 'Reroute Reason';
+
+    document.getElementById(
+        'rerouteReason'
+    ).placeholder =
+        initial
+            ? 'Why is this Recovery Path being assigned?'
+            : 'Why is this device being rerouted?';
+
+    document.getElementById(
+        'createButton'
+    ).textContent =
+        initial
+            ? 'Create Initial Movement'
+            : 'Create Pending Movement';
+}
+
+
+function showMessage(
+    element,
+    message,
+    type
+) {
+    element.textContent = message;
+
+    element.className =
+        'message visible ' + type;
+}
+
+
+function clearMessage(element)
+{
+    element.textContent = '';
+    element.className = 'message';
+}
+
+
+async function lookupDevice()
+{
+    const serialInput =
+        document.getElementById(
+            'serialInput'
+        );
+
+    const serial =
+        serialInput.value.trim();
+
+    const message =
+        document.getElementById(
+            'lookupMessage'
+        );
+
+    const panel =
+        document.getElementById(
+            'devicePanel'
+        );
+
+    clearMessage(message);
+
+    panel.classList.remove(
+        'visible'
+    );
+
+    currentDevice = null;
+
+    if (!serial) {
+
+        showMessage(
+            message,
+            'Enter or scan a serial number.',
+            'error'
+        );
+
+        serialInput.focus();
+
+        return;
+    }
+
+    try {
+
+        const response = await fetch(
+            '/api/reroute/device_lookup.php?serial=' +
+            encodeURIComponent(serial),
+            {
+                headers: {
+                    'Accept': 'application/json'
+                }
+            }
+        );
+
+        const result =
+            await response.json();
+
+        if (
+            !response.ok ||
+            !result.success
+        ) {
+
+            throw new Error(
+                result.message ||
+                'Device not found.'
+            );
+        }
+
+        currentDevice =
+            result.device;
+
+        if (
+            currentDevice.pending_reroute
+        ) {
+
+            showMessage(
+                message,
+                'This device already has a pending reroute.',
+                'error'
+            );
+
+            return;
+        }
+
+        renderDevice(
+            currentDevice
+        );
+
+        panel.classList.add(
+            'visible'
+        );
+
+        document.getElementById(
+            'newRecoveryType'
+        ).focus();
+
+    } catch (error) {
+
+        showMessage(
+            message,
+            error.message ||
+            'Unable to find device.',
+            'error'
+        );
+    }
+}
+
+
+function renderDevice(device)
+{
+    document.getElementById(
+        'deviceSerial'
+    ).textContent =
+        valueOrDash(
+            device.serial_number
+        );
+
+    document.getElementById(
+        'deviceProduct'
+    ).textContent =
+        valueOrDash(
+            device.product_id
+        );
+
+    document.getElementById(
+        'deviceStatus'
+    ).textContent =
+        valueOrDash(
+            device.recovery_status
+        );
+
+    document.getElementById(
+        'currentPath'
+    ).textContent =
+        recoveryLabel(
+            device.recovery_type
+        );
+
+    document.getElementById(
+        'currentLocation'
+    ).textContent =
+        valueOrDash(
+            device.location_name
+        );
+
+    document.getElementById(
+        'erpDeviceId'
+    ).textContent =
+        valueOrDash(
+            device.erp_device_id
+        );
+
+    document.getElementById(
+        'deviceGrade'
+    ).textContent =
+        valueOrDash(
+            device.grade
+        );
+
+
+    const defectContainer =
+        document.getElementById(
+            'deviceDefects'
+        );
+
+    defectContainer.innerHTML = '';
+
+    if (
+        Array.isArray(device.defects) &&
+        device.defects.length > 0
+    ) {
+
+        device.defects.forEach(
+            defect => {
+
+                const element =
+                    document.createElement(
+                        'span'
+                    );
+
+                element.className =
+                    'defect';
+
+                element.textContent =
+                    defect.defect_code;
+
+                defectContainer.appendChild(
+                    element
+                );
+            }
+        );
+
+    } else {
+
+        const element =
+            document.createElement(
+                'span'
+            );
+
+        element.className =
+            'muted';
+
+        element.textContent =
+            'No defect codes';
+
+        defectContainer.appendChild(
+            element
+        );
+    }
+
+
+    applyRoutingMode(device);
+
+    const pathSelect =
+        document.getElementById(
+            'newRecoveryType'
+        );
+
+    pathSelect.value = '';
+
+    const initialRouting =
+        isInitialRouting(device);
+
+    Array.from(
+        pathSelect.options
+    ).forEach(option => {
+
+        option.disabled =
+            !initialRouting &&
+            option.value !== '' &&
+            option.value ===
+                device.recovery_type;
+    });
+
+    document.getElementById(
+        'rerouteReason'
+    ).value = '';
+
+    document.getElementById(
+        'destinationBox'
+    ).classList.remove(
+        'visible'
+    );
+
+    clearMessage(
+        document.getElementById(
+            'createMessage'
+        )
+    );
+}
+
+
+function updateDestination()
+{
+    const path =
+        document.getElementById(
+            'newRecoveryType'
+        ).value;
+
+    const box =
+        document.getElementById(
+            'destinationBox'
+        );
+
+    if (
+        !path ||
+        !destinations[path]
+    ) {
+
+        box.classList.remove(
+            'visible'
+        );
+
+        return;
+    }
+
+    const destination =
+        destinations[path];
+
+    document.getElementById(
+        'destinationName'
+    ).textContent =
+        destination.location_name;
+
+    document.getElementById(
+        'destinationMeta'
+    ).textContent =
+        'ERP Location #' +
+        destination.erp_location_id +
+        ' · ' +
+        valueOrDash(
+            destination.location_type
+        );
+
+    box.classList.add(
+        'visible'
+    );
+}
+
+
+async function createReroute()
+{
+    if (!currentDevice) {
+        return;
+    }
+
+    const path =
+        document.getElementById(
+            'newRecoveryType'
+        ).value;
+
+    const reason =
+        document.getElementById(
+            'rerouteReason'
+        ).value.trim();
+
+    const message =
+        document.getElementById(
+            'createMessage'
+        );
+
+    const button =
+        document.getElementById(
+            'createButton'
+        );
+
+    clearMessage(message);
+
+    if (!path) {
+
+        showMessage(
+            message,
+            isInitialRouting(currentDevice)
+                ? 'Select a Recovery Path.'
+                : 'Select a new Recovery Path.',
+            'error'
+        );
+
+        return;
+    }
+
+    if (!destinations[path]) {
+
+        showMessage(
+            message,
+            'No active destination is configured for this path.',
+            'error'
+        );
+
+        return;
+    }
+
+    if (!reason) {
+
+        showMessage(
+            message,
+            isInitialRouting(currentDevice)
+                ? 'Enter a routing reason.'
+                : 'Enter a reroute reason.',
+            'error'
+        );
+
+        return;
+    }
+
+    button.disabled = true;
+
+    try {
+
+        const response = await fetch(
+            '/api/reroute/create.php',
+            {
+                method: 'POST',
+
+                headers: {
+                    'Content-Type':
+                        'application/json',
+
+                    'Accept':
+                        'application/json'
+                },
+
+                body: JSON.stringify({
+                    device_id:
+                        currentDevice.id,
+
+                    new_recovery_type:
+                        path,
+
+                    reason:
+                        reason,
+
+                    routing_mode:
+                        isInitialRouting(currentDevice)
+                            ? 'INITIAL'
+                            : 'REROUTE'
+                })
+            }
+        );
+
+        const result =
+            await response.json();
+
+        if (
+            !response.ok ||
+            !result.success
+        ) {
+
+            throw new Error(
+                result.message ||
+                'Unable to create reroute.'
+            );
+        }
+
+        showMessage(
+            message,
+            (
+                isInitialRouting(currentDevice)
+                    ? 'Initial routing created. Move the device to '
+                    : 'Pending reroute created. Move the device to '
+            ) +
+            result.reroute.new_location_name +
+            '.',
+            'success'
+        );
+
+        await refreshPending();
+
+        currentDevice.pending_reroute =
+            result.reroute;
+
+        button.disabled = true;
+
+    } catch (error) {
+
+        showMessage(
+            message,
+            error.message ||
+            'Unable to create reroute.',
+            'error'
+        );
+
+        button.disabled = false;
+    }
+}
+
+
+async function refreshPending()
+{
+    try {
+
+        const response = await fetch(
+            '/api/reroute/pending.php',
+            {
+                headers: {
+                    'Accept':
+                        'application/json'
+                }
+            }
+        );
+
+        const result =
+            await response.json();
+
+        if (
+            !response.ok ||
+            !result.success
+        ) {
+            return;
+        }
+
+        renderPending(
+            result.reroutes
+        );
+
+    } catch (error) {
+
+        console.error(
+            'Unable to refresh pending reroutes.'
+        );
+    }
+}
+
+
+function renderPending(reroutes)
+{
+    const list =
+        document.getElementById(
+            'pendingList'
+        );
+
+    const count =
+        document.getElementById(
+            'pendingCount'
+        );
+
+    count.textContent =
+        reroutes.length;
+
+    list.innerHTML = '';
+
+    if (!reroutes.length) {
+
+        const empty =
+            document.createElement(
+                'div'
+            );
+
+        empty.className =
+            'pending-empty';
+
+        empty.textContent =
+            'No pending reroutes.';
+
+        list.appendChild(
+            empty
+        );
+
+        return;
+    }
+
+
+    reroutes.forEach(
+        reroute => {
+
+            const item =
+                document.createElement(
+                    'div'
+                );
+
+            item.className =
+                'pending-item';
+
+
+            const serial =
+                document.createElement(
+                    'div'
+                );
+
+            serial.className =
+                'pending-serial';
+
+            serial.textContent =
+                valueOrDash(
+                    reroute.serial_number
+                );
+
+
+            const product =
+                document.createElement(
+                    'div'
+                );
+
+            product.className =
+                'pending-product';
+
+            product.textContent =
+                valueOrDash(
+                    reroute.product_id
+                );
+
+
+            const route =
+                document.createElement(
+                    'div'
+                );
+
+            route.className =
+                'route-line';
+
+
+            const from =
+                document.createElement(
+                    'span'
+                );
+
+            from.className =
+                'route-path';
+
+            from.textContent =
+                recoveryLabel(
+                    reroute.original_recovery_type
+                );
+
+
+            const arrow =
+                document.createElement(
+                    'span'
+                );
+
+            arrow.className =
+                'route-arrow';
+
+            arrow.textContent =
+                '→';
+
+
+            const to =
+                document.createElement(
+                    'span'
+                );
+
+            to.className =
+                'route-path';
+
+            to.textContent =
+                recoveryLabel(
+                    reroute.new_recovery_type
+                );
+
+
+            route.appendChild(from);
+            route.appendChild(arrow);
+            route.appendChild(to);
+
+
+            const location =
+                document.createElement(
+                    'div'
+                );
+
+            location.className =
+                'pending-location';
+
+            location.textContent =
+                'Destination: ' +
+                valueOrDash(
+                    reroute.new_location_name
+                );
+
+
+            const reason =
+                document.createElement(
+                    'div'
+                );
+
+            reason.className =
+                'pending-reason';
+
+            reason.textContent =
+                valueOrDash(
+                    reroute.reroute_reason
+                );
+
+
+            const time =
+                document.createElement(
+                    'div'
+                );
+
+            time.className =
+                'pending-time';
+
+            time.textContent =
+                'Requested: ' +
+                valueOrDash(
+                    reroute.requested_at
+                );
+
+
+            item.appendChild(serial);
+            item.appendChild(product);
+            item.appendChild(route);
+            item.appendChild(location);
+            item.appendChild(reason);
+            item.appendChild(time);
+
+            list.appendChild(item);
+        }
+    );
+}
+
+
+document.getElementById(
+    'serialInput'
+).addEventListener(
+    'keydown',
+    function(event) {
+
+        if (event.key === 'Enter') {
+
+            event.preventDefault();
+
+            lookupDevice();
+        }
+    }
+);
+
+</script>
+
+</body>
+</html>
